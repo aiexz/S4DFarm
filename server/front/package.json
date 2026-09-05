@@ -2,6 +2,7 @@
   "name": "front-new",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@8.15.0",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

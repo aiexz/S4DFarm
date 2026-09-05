@@ -1,1 +1,11 @@
 /front/node_modules
+/front/dist
+/front/.vite
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.env
+vol/

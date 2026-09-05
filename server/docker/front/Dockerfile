@@ -3,11 +3,13 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
-COPY front /app
 WORKDIR /app
 
-FROM front-base AS front-build
+COPY front/package.json front/pnpm-lock.yaml ./
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+
+FROM front-base AS front-build
+COPY front .
 RUN pnpm run build
 
 FROM nginx:1.21.0-alpine

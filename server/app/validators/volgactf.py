@@ -8,7 +8,10 @@ PUBLIC_KEY_ENDPOINT = 'public_key'
 
 
 def get_public_key(host):
-    r = requests.get(f"{host}/{API_PREFIX}/{PUBLIC_KEY_ENDPOINT}")
+    if not host.startswith(('http://', 'https://')):
+        host = f"https://{host}"
+    host = host.rstrip('/')
+    r = requests.get(f"{host}/{API_PREFIX}/{PUBLIC_KEY_ENDPOINT}", timeout=5)
 
     if r is not None and r.status_code == requests.codes.ok:
         return r.text
@@ -28,8 +31,12 @@ def decode(key, capsule):
 def validate_flags(flags, config):
     key = config.get('SYSTEM_SERVER_KEY')
     if not key:
-        key = get_public_key(config['SYSTEM_HOST'])
-
+        try:
+            key = get_public_key(config['SYSTEM_HOST'])
+        except Exception:
+            for item in flags:
+                yield item
+            return
     for item in flags:
         item = copy.deepcopy(item)
         flag = item['flag']

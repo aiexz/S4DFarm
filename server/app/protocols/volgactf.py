@@ -61,15 +61,17 @@ RESPONSES = {
 
 class API:
     def __init__(self, host: str, timezone: str, version='v1'):
-        self.api_base = f'https://{host}/api/flag/{version}'
+        clean_host = host.replace('https://', '').replace('http://', '').rstrip('/')
+        self.api_base = f'https://{clean_host}/api/flag/{version}'
         self.timezone = pytz.timezone(timezone)
+        self.session = requests.Session()
 
     def flag_is_fresh(self, info, until_seconds=2):
         expiry = dateutil.parser.parse(info['exp'])
-        until = datetime.datetime.now() + datetime.timedelta(seconds=until_seconds)
-        until = self.timezone.localize(until)
+        until = datetime.datetime.now(self.timezone) + datetime.timedelta(seconds=until_seconds)
+        if expiry.tzinfo is None:
+            expiry = self.timezone.localize(expiry)
         return expiry >= until
-
     def parse_flag_info_response(self, flag: str, response: requests.Response):
         if response.status_code == 200:
             info = response.json()
@@ -88,8 +90,15 @@ class API:
         return False, SubmitResult(flag, FlagStatus.QUEUED, f'error response from flag getinfo: {respcode}')
 
     def info_flags(self, *flags: str):
-        responses = list(map(lambda flag: requests.get(f'{self.api_base}/info/{flag}'), flags))
-        return dict(zip(flags, map(self.parse_flag_info_response, flags, responses)))
+        parsed = []
+        for flag in flags:
+            try:
+                resp = self.session.get(f'{self.api_base}/info/{flag}', timeout=5)
+                parsed.append(self.parse_flag_info_response(flag, resp))
+            except Exception as e:
+                logger.warning('Failed to get flag info for %s: %s', flag, e)
+                parsed.append((False, SubmitResult(flag, FlagStatus.QUEUED, f'flag info network error: {e}')))
+        return dict(zip(flags, parsed))
 
     @staticmethod
     def parse_flag_submit_response(flag: str, response: requests.Response):
@@ -106,15 +115,20 @@ class API:
 
     def submit_flags(self, *flags: str):
         h = {'Content-Type': 'text/plain'}
-        responses = [requests.post(f'{self.api_base}/submit', data=flag, headers=h) for flag in flags]
-        return map(self.parse_flag_submit_response, flags, responses)
+        for flag in flags:
+            try:
+                resp = self.session.post(f'{self.api_base}/submit', data=flag, headers=h, timeout=5)
+                yield self.parse_flag_submit_response(flag, resp)
+            except Exception as e:
+                logger.warning('Failed to submit flag %s: %s', flag, e)
+                yield SubmitResult(flag, FlagStatus.QUEUED, f'submit network error: {e}')
 
 
 def submit_flags(flags, config):
     flags = list(map(lambda flag: flag.flag, flags))
 
     api = API(host=config['SYSTEM_HOST'], timezone=config['TIMEZONE'])
-    info_rate = config['INFO_FLAG_LIMIT']
+    info_rate = config.get('INFO_FLAG_LIMIT', config['SUBMIT_FLAG_LIMIT'])
     submit_rate = config['SUBMIT_FLAG_LIMIT']
 
     # Get as much flag infos as we can

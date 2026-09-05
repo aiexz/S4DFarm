@@ -46,9 +46,8 @@ def get_fair_share(groups: List[List[T]], limit: int) -> List[T]:
 def submit_flags(flags: List[Flag], config) -> List[SubmitResult]:
     module_path = 'protocols.' + config['SYSTEM_PROTOCOL']
     logger.debug('importing the protocol from %s', module_path)
-    module = importlib.import_module(module_path)
-
     try:
+        module = importlib.import_module(module_path)
         return list(module.submit_flags(flags, config))
     except Exception as e:
         message = '{}: {}'.format(type(e).__name__, str(e))

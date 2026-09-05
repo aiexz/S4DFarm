@@ -8,11 +8,13 @@ services:
     environment:
       REDIS_URL: 'redis://redis:6379/0'
       POSTGRES_DSN: 'host=postgres port=5432 user=farm password=farm dbname=farm'
-      SERVER_PASSWORD: ${SERVER_PASSWORD}
+      SERVER_PASSWORD: ${SERVER_PASSWORD:-1234}
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
 
   celery:
     build:
@@ -27,6 +29,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
 
   front:
     build:

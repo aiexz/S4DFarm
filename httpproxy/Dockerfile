@@ -1,13 +1,15 @@
-FROM golang:1.18-alpine as build
+FROM golang:1.22-alpine AS build
 
 WORKDIR /app
 COPY go.* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY proxy proxy
-RUN CGO_ENABLED=0 go build -o cacheproxy proxy/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o cacheproxy proxy/main.go
 
-FROM alpine
+FROM alpine:3.20
 
 COPY --from=build /app/cacheproxy /cacheproxy
 RUN chmod +x /cacheproxy

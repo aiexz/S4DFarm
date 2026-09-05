@@ -4,7 +4,7 @@ ENV PYTHONPATH=/app:${PYTHONPATH}
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
 COPY ./docker/server/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

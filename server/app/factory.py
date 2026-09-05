@@ -41,6 +41,7 @@ def create_celery():
         broker=broker,
         include=['tasks'],
     )
+    celery.conf.broker_connection_retry_on_startup = True
     period = get_config()['SUBMIT_PERIOD']
     celery.conf.beat_schedule = {
         f'submit_flags': {
