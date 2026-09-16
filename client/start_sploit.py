@@ -2,7 +2,9 @@
 
 import argparse
 import binascii
+import hashlib
 import itertools
+import socket
 import logging
 import os
 import random
@@ -108,6 +110,11 @@ def parse_args():
     group.add_argument('--distribute', metavar='K/N',
                        help='Divide the team list to N parts (by address hash modulo N) '
                             'and run the sploits only on Kth part of it (K >= 1)')
+    parser.add_argument('--client-id', metavar='ID',
+                        default=os.getenv('CLIENT_ID', socket.gethostname()),
+                        help='Client identifier for execution telemetry')
+    parser.add_argument('--service', metavar='NAME',
+                        help='Service name (guessed from port or sploit if not specified)')
 
     return parser.parse_args()
 
@@ -272,6 +279,73 @@ def post_flags(args, flags):
     if not r.ok:
         raise APIException(r.text)
 
+def get_sploit_hash(sploit_path):
+    try:
+        with open(sploit_path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except Exception:
+        return 'unknown'
+
+
+def guess_service(sploit_path, args_service=None, team_addr=None):
+    if args_service:
+        return args_service
+    if team_addr and ':' in team_addr:
+        parts = team_addr.split(':')
+        if len(parts) == 2 and parts[1].isdigit():
+            return f"port_{parts[1]}"
+    try:
+        with open(sploit_path, 'r', errors='ignore') as f:
+            content = f.read(8192)
+            match = re.search(r'(?:PORT|port)\s*=\s*(\d{2,5})', content)
+            if match:
+                return f"port_{match.group(1)}"
+            match = re.search(r'(?:connect|socket)[^)]*,\s*(\d{2,5})\)', content)
+            if match:
+                return f"port_{match.group(1)}"
+            match = re.search(r'https?://[^:\s/]+:(\d{2,5})', content)
+            if match:
+                return f"port_{match.group(1)}"
+    except Exception:
+        pass
+    base = os.path.basename(sploit_path)
+    return os.path.splitext(base)[0]
+
+
+def post_executions(args, executions):
+    url = urljoin(args.server_url, '/api/post_executions')
+    headers = get_auth_headers(args)
+    r = requests.post(url, headers=headers, json=executions, timeout=SERVER_TIMEOUT)
+    if not r.ok:
+        raise APIException(r.text)
+
+
+class ExecutionStorage:
+    def __init__(self):
+        self._queue = []
+        self._lock = threading.RLock()
+
+    def add(self, item):
+        with self._lock:
+            self._queue.append(item)
+
+    def pick_executions(self, count):
+        with self._lock:
+            return self._queue[:count]
+
+    def mark_as_sent(self, count):
+        with self._lock:
+            self._queue = self._queue[count:]
+
+    @property
+    def queue_size(self):
+        with self._lock:
+            return len(self._queue)
+
+
+execution_storage = ExecutionStorage()
+POST_EXECUTION_LIMIT = 500
+
 
 exit_event = threading.Event()
 
@@ -346,6 +420,17 @@ def run_post_loop(args):
                 except Exception as e:
                     logging.error("Can't post flags to the server: {}".format(repr(e)))
                     logging.info("The flags will be posted next time")
+
+            execs_to_post = execution_storage.pick_executions(POST_EXECUTION_LIMIT)
+            if execs_to_post:
+                try:
+                    post_executions(args, execs_to_post)
+                    execution_storage.mark_as_sent(len(execs_to_post))
+                    logging.debug('{} telemetry executions posted to server ({} in queue)'.format(
+                        len(execs_to_post), execution_storage.queue_size))
+                except Exception as e:
+                    logging.error("Can't post telemetry executions: {}".format(repr(e)))
+                    logging.debug("Telemetry will be posted next time")
     except Exception as e:
         logging.critical('Posting loop died: {}'.format(repr(e)))
         shutdown()
@@ -364,7 +449,7 @@ def display_sploit_output(team_name, output_lines):
         print('\n' + '\n'.join(prefix + line.rstrip() for line in output_lines) + '\n')
 
 
-def process_sploit_output(stream, args, team_name, flag_format, attack_no):
+def process_sploit_output(stream, args, team_name, flag_format, attack_no, context=None):
     try:
         output_lines = []
         instance_flags = set()
@@ -378,11 +463,15 @@ def process_sploit_output(stream, args, team_name, flag_format, attack_no):
 
             line = line.decode(errors='replace')
             output_lines.append(line)
+            if context is not None:
+                context['output'].append(line)
 
             line_flags = set(flag_format.findall(line))
             if line_flags:
                 flag_storage.add(line_flags, team_name)
                 instance_flags |= line_flags
+                if context is not None:
+                    context['flags'] |= line_flags
 
             if args.endless and line_cnt <= args.verbose_attacks * VERBOSE_LINES:
                 line_cnt += 1
@@ -436,7 +525,7 @@ instance_storage = InstanceStorage()
 instance_lock = threading.RLock()
 
 
-def launch_sploit(args, team_name, team_addr, attack_no, flag_format):
+def launch_sploit(args, team_name, team_addr, attack_no, flag_format, context=None):
     # For sploits written in Python, this env variable forces the interpreter to flush
     # stdout and stderr after each newline. Note that this is not default behavior
     # if the sploit's output is redirected to a pipe.
@@ -461,19 +550,27 @@ def launch_sploit(args, team_name, team_addr, attack_no, flag_format):
     if os_windows:
         kernel32.SetConsoleCtrlHandler(win_ignore_ctrl_c, False)
 
-    threading.Thread(target=lambda: process_sploit_output(
-        proc.stdout, args, team_name, flag_format, attack_no)).start()
+    out_thread = threading.Thread(target=lambda: process_sploit_output(
+        proc.stdout, args, team_name, flag_format, attack_no, context=context))
+    out_thread.start()
 
-    return proc, instance_storage.register_start(proc)
+    return proc, instance_storage.register_start(proc), out_thread
 
 
 def run_sploit(args, team_name, team_addr, attack_no, max_runtime, flag_format):
+    start_time = time.time()
+    context = {'flags': set(), 'output': []}
+    out_thread = None
+    proc = None
+    instance_id = None
+
     try:
         with instance_lock:
             if exit_event.is_set():
                 return
 
-            proc, instance_id = launch_sploit(args, team_name, team_addr, attack_no, flag_format)
+            proc, instance_id, out_thread = launch_sploit(
+                args, team_name, team_addr, attack_no, flag_format, context=context)
     except Exception as e:
         if isinstance(e, FileNotFoundError):
             logging.error('Sploit file or the interpreter for it not found: {}'.format(repr(e)))
@@ -481,6 +578,22 @@ def run_sploit(args, team_name, team_addr, attack_no, max_runtime, flag_format):
                 highlight('#!/usr/bin/env ...', [Style.FG_GREEN])))
         else:
             logging.error('Failed to run sploit: {}'.format(repr(e)))
+
+        execution_storage.add({
+            'client_id': getattr(args, 'client_id', socket.gethostname()),
+            'sploit_id': os.path.basename(args.sploit),
+            'sploit_hash': get_sploit_hash(args.sploit),
+            'service': guess_service(args.sploit, getattr(args, 'service', None), team_addr),
+            'team': team_name if team_name != '*' else (team_addr or '*'),
+            'round': attack_no,
+            'start_time': start_time,
+            'end_time': time.time(),
+            'duration': 0.0,
+            'exit_code': -1,
+            'timeout': False,
+            'flags_found': 0,
+            'output_preview': f'Launch error: {repr(e)}',
+        })
 
         if attack_no == 1:
             shutdown()
@@ -500,6 +613,30 @@ def run_sploit(args, team_name, team_addr, attack_no, max_runtime, flag_format):
                 proc.kill()
 
             instance_storage.register_stop(instance_id, need_kill)
+
+        if out_thread is not None:
+            out_thread.join(timeout=1.0)
+
+        end_time = time.time()
+        duration = round(end_time - start_time, 3)
+        exit_code = proc.returncode if proc.returncode is not None else (-9 if need_kill else -1)
+        output_snippet = ''.join(context['output'][-25:])[:2000]
+
+        execution_storage.add({
+            'client_id': getattr(args, 'client_id', socket.gethostname()),
+            'sploit_id': os.path.basename(args.sploit),
+            'sploit_hash': get_sploit_hash(args.sploit),
+            'service': guess_service(args.sploit, getattr(args, 'service', None), team_addr),
+            'team': team_name if team_name != '*' else (team_addr or '*'),
+            'round': attack_no,
+            'start_time': start_time,
+            'end_time': end_time,
+            'duration': duration,
+            'exit_code': exit_code,
+            'timeout': need_kill,
+            'flags_found': len(context['flags']),
+            'output_preview': output_snippet,
+        })
     except Exception as e:
         logging.error('Failed to finish sploit: {}'.format(repr(e)))
 

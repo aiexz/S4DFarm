@@ -12,9 +12,9 @@ import { mapActions } from "vuex";
 export default {
   components: { TeamsTable },
   created: async function () {
-    await this.fetchTeams();
+    await Promise.all([this.fetchTeams(), this.fetchTelemetry()]);
   },
-  methods: mapActions(["fetchTeams"]),
+  methods: mapActions(["fetchTeams", "fetchTelemetry"]),
 };
 </script>
 

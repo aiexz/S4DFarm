@@ -24,3 +24,20 @@ class SubmitResult:
     flag: str
     status: FlagStatus
     checksystem_response: str
+
+
+@dataclass
+class Execution:
+    client_id: str
+    sploit_id: str
+    sploit_hash: str
+    service: str
+    team: str
+    round: int
+    start_time: float
+    end_time: float
+    duration: float
+    exit_code: int
+    timeout: bool
+    flags_found: int
+    output_preview: str

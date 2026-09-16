@@ -24,6 +24,7 @@ export default createStore({
     teams: [],
 
     serverPassword: null,
+    telemetry: null,
   },
   mutations: {
     setTotalFlags(state, totalFlags) {
@@ -57,6 +58,9 @@ export default createStore({
 
     setServerPassword(state, password) {
       state.serverPassword = password;
+    },
+    setTelemetry(state, telemetry) {
+      state.telemetry = telemetry;
     },
   },
   actions: {
@@ -105,6 +109,15 @@ export default createStore({
         context.commit("setTeams", teams);
       } catch (e) {
         console.error("Error fetching teams", e);
+      }
+    },
+    fetchTelemetry: async function (context, params = {}) {
+      try {
+        const { data } = await APIService.get("/telemetry", { params });
+        context.commit("setTelemetry", data);
+        return data;
+      } catch (e) {
+        console.error("Error fetching telemetry", e);
       }
     },
   },
